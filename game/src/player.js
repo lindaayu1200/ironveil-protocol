@@ -1,5 +1,4 @@
-// Player movement: acceleration, friction, gravity, crouch and jump, resolved as a box against
-// the world's colliders one axis at a time, so a wall never swallows the player.
+// Player movement: acceleration, friction, gravity, crouch, jump, head bob, collision.
 import * as THREE from 'three';
 
 const RADIUS = 0.34;
@@ -17,7 +16,7 @@ const JUMP_SPEED = 6.2;
 
 export function createPlayer(colliders) {
   const player = {
-    position: new THREE.Vector3(0, 0, 9.5),
+    position: new THREE.Vector3(0, 0, 20),
     velocity: new THREE.Vector3(),
     yaw: 0,
     pitch: 0,
@@ -25,12 +24,14 @@ export function createPlayer(colliders) {
     onGround: true,
     crouching: false,
     height: STAND_HEIGHT,
+    hp: 100,
+    maxHp: 100,
+    alive: true,
   };
   const probe = new THREE.Box3();
   const wish = new THREE.Vector3();
+  let bobTimer = 0;
 
-  // lift keeps the feet and the crown out of the horizontal tests, so standing on the floor
-  // is not read as walking into a wall.
   function overlaps(x, y, z, height, lift) {
     probe.min.set(x - RADIUS, y + lift, z - RADIUS);
     probe.max.set(x + RADIUS, y + height - lift, z + RADIUS);
@@ -49,6 +50,8 @@ export function createPlayer(colliders) {
   }
 
   function step(dt, keys) {
+    if (!player.alive) return;
+
     const crouching = keys.has('ControlLeft') || keys.has('ControlRight') || keys.has('KeyC');
     if (crouching && !player.crouching) {
       player.crouching = true;
@@ -67,6 +70,10 @@ export function createPlayer(colliders) {
       const sin = Math.sin(player.yaw);
       const cos = Math.cos(player.yaw);
       wish.set(-sin * forward + cos * strafe, 0, -cos * forward - sin * strafe).normalize();
+      if (player.onGround) {
+        bobTimer += dt * (player.crouching ? 8 : 12);
+        player.eye += Math.sin(bobTimer) * 0.015;
+      }
     }
 
     const speed = player.crouching ? CROUCH_SPEED : WALK_SPEED;

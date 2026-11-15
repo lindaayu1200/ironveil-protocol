@@ -3,16 +3,19 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Greybox Range: a three.js FPS starter</title>
+<title>Ironveil Protocol</title>
+<link rel="icon" href="data:,">
 <style>
-  /* Look plan: canvas, surface, hairline, ink, muted and one accent. Every colour below is one of the six. */
+  /* Look plan: industrial dusk palette - canvas, surface, hairline, ink, muted, accent, teal, oxide */
   :root {
-    --canvas: #14161a;
-    --surface: #1e2228;
-    --hairline: #2c323a;
-    --ink: #e9e6df;
-    --muted: #98a0a8;
-    --accent: #f0a830;
+    --canvas: #0f141a;
+    --surface: #18212c;
+    --hairline: #273445;
+    --ink: #e2e8f0;
+    --muted: #8293ad;
+    --accent: #f59e0b;
+    --teal: #0d9488;
+    --oxide: #b91c1c;
     --radius-panel: 4px;
     --radius-control: 8px;
     --font-ui: system-ui, -apple-system, 'Segoe UI', sans-serif;
@@ -156,14 +159,18 @@
 
 <div id="overlay" class="overlay">
   <section class="panel" role="dialog" aria-modal="true" aria-labelledby="overlay-title">
-    <h1 id="overlay-title">Greybox Range</h1>
-    <p id="overlay-copy">A plain room, one rifle and four targets. Click to play.</p>
+    <h1 id="overlay-title">Ironveil Protocol</h1>
+    <p id="overlay-copy">Tactical round-based FPS. Eliminate Crimson Cartel or plant the bomb at Site A or B. Click to play.</p>
     <button id="play" type="button">Click to play</button>
     <ul class="keys">
       <li><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> Move</li>
       <li><kbd>Mouse</kbd> Look</li>
       <li><kbd>Click</kbd> Fire</li>
       <li><kbd>R</kbd> Reload</li>
+      <li><kbd>1-4</kbd> Switch Weapon</li>
+      <li><kbd>B</kbd> Buy Menu</li>
+      <li><kbd>G</kbd> Frag Grenade</li>
+      <li><kbd>E</kbd> Plant Bomb</li>
       <li><kbd>Ctrl</kbd> Crouch</li>
       <li><kbd>Space</kbd> Jump</li>
     </ul>

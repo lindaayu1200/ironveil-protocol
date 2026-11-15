@@ -1,32 +1,20 @@
-// Boot and the one loop: a fixed 60 Hz simulation feeding a render at the display's rate.
-// ?shot=start|play|end with &seed=N sets up a deterministic frame for a capture, renders it
-// twice, then freezes it and sets window.__shotReady.
+// Boot and main loop: fixed 60Hz simulation feeding render, connecting all Ironveil Protocol systems.
 import * as THREE from 'three';
 import { PALETTE } from './palette.js';
+import { store } from './store.js';
+import { audio } from './audio.js';
 import { createWorld } from './world.js';
 import { createInput } from './input.js';
 import { createPlayer } from './player.js';
-import { createWeapon } from './weapon.js';
-import { createTargets } from './targets.js';
+import { createWeaponSystem } from './weapons.js';
+import { createGrenades } from './grenades.js';
+import { createBots } from './bots.js';
+import { createEconomy } from './economy.js';
+import { createRoundState } from './roundState.js';
+import { createMinimap } from './minimap.js';
 import { createHud } from './hud.js';
 
 const FIXED_STEP = 1 / 60;
-const params = new URLSearchParams(window.location.search);
-const shot = params.get('shot');
-const seed = Number.parseInt(params.get('seed') ?? '1', 10) || 1;
-
-function mulberry32(initial) {
-  let a = initial;
-  return function random() {
-    a |= 0;
-    a = (a + 0x6d2b79f5) | 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
-const random = mulberry32(seed);
-
 const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
@@ -35,57 +23,55 @@ renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 document.getElementById('game').appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(PALETTE.canvas);
-scene.fog = new THREE.Fog(new THREE.Color(PALETTE.canvas), 18, 46);
 const camera = new THREE.PerspectiveCamera(74, window.innerWidth / window.innerHeight, 0.05, 140);
 scene.add(camera);
 
 const world = createWorld(scene);
-const targets = createTargets(scene);
-const weapon = createWeapon(camera);
-const hud = createHud();
 const player = createPlayer(world.colliders);
+const weaponSystem = createWeaponSystem(camera, store);
+const economy = createEconomy(store, weaponSystem);
+const bots = createBots(scene, world.colliders);
+const grenades = createGrenades(scene, world.colliders, store);
+const roundState = createRoundState(store, world, bots, player.state, weaponSystem);
+const minimap = createMinimap();
+const hud = createHud(store, (itemKey) => {
+  economy.buy(itemKey);
+});
+
 const input = createInput(renderer.domElement, onLockChange);
 const raycaster = new THREE.Raycaster();
-raycaster.far = 80;
-const shootables = world.shootables.concat(targets.hitMeshes);
+raycaster.far = 100;
 const direction = new THREE.Vector3();
+const activeTracers = [];
+
+function createTracer(from, to) {
+  const geom = new THREE.BufferGeometry().setFromPoints([from, to]);
+  const mat = new THREE.LineBasicMaterial({ color: new THREE.Color(PALETTE.accent), transparent: true, opacity: 0.95, depthWrite: false });
+  const line = new THREE.Line(geom, mat);
+  scene.add(line);
+  activeTracers.push({ line, ttl: 0.08 });
+}
 
 const body = player.state;
-const markerHoldMs = shot ? 4000 : 90;
-let score = 0;
 let elapsed = 0;
-let cleared = false;
-let frozen = false;
-let started = false;
 let accumulator = 0;
 let lastTime = performance.now();
+let buyMenuOpen = false;
+let plantHoldTime = 0;
+let defuseHoldTime = 0;
 
-hud.setAmmo(weapon.state.mag, weapon.state.reserve);
-hud.setScore(0);
 hud.onPlay(() => {
-  if (shot) return;
-  if (cleared) restart();
+  audio.init();
   input.requestLock();
 });
 
-function restart() {
-  cleared = false;
-  score = 0;
-  elapsed = 0;
-  targets.reset();
-  weapon.refill();
-  hud.setScore(0);
-  hud.setAmmo(weapon.state.mag, weapon.state.reserve);
-}
-
 function onLockChange(locked) {
-  if (shot) return;
   if (locked) {
-    started = true;
     hud.hideOverlay();
-  } else if (!cleared) {
-    hud.showOverlay(started ? 'paused' : 'start', score);
+    hud.showBuyMenu(false);
+    buyMenuOpen = false;
+  } else if (store.roundState !== 'ended') {
+    if (!buyMenuOpen) hud.showOverlay('paused', 0);
   }
 }
 
@@ -94,124 +80,163 @@ function syncCamera() {
   camera.rotation.set(body.pitch, body.yaw, 0, 'YXZ');
 }
 
-function aimAt(point) {
-  const dx = point.x - body.position.x;
-  const dy = point.y - (body.position.y + body.eye);
-  const dz = point.z - body.position.z;
-  const length = Math.hypot(dx, dy, dz) || 1;
-  body.yaw = Math.atan2(-dx, -dz);
-  body.pitch = Math.asin(Math.max(-1, Math.min(1, dy / length)));
-  syncCamera();
-}
+function shoot() {
+  if (!weaponSystem.ready()) return;
+  const wData = weaponSystem.getActiveWeapon();
+  if (!weaponSystem.takeRound()) return;
 
-function shoot(spread) {
-  if (!weapon.takeRound()) return false;
+  const spread = weaponSystem.spread(player.groundSpeed(), body.crouching);
   camera.getWorldDirection(direction);
-  direction.x += (random() * 2 - 1) * spread;
-  direction.y += (random() * 2 - 1) * spread;
-  direction.z += (random() * 2 - 1) * spread;
+  direction.x += (Math.random() * 2 - 1) * spread;
+  direction.y += (Math.random() * 2 - 1) * spread;
+  direction.z += (Math.random() * 2 - 1) * spread;
   direction.normalize();
+
   scene.updateMatrixWorld(true);
   raycaster.set(camera.position, direction);
+  const shootables = world.shootables.concat(bots.hitMeshes);
   const hit = raycaster.intersectObjects(shootables, false)[0];
-  if (hit && hit.object.userData.target) {
-    const killed = targets.damage(hit.object, hit.object.userData.part === 'head' ? 100 : 34);
-    score += killed ? 100 : 10;
-    hud.setScore(score);
-    hud.hitMarker(killed, markerHoldMs);
-    if (targets.remaining() === 0 && !cleared) {
-      cleared = true;
-      hud.showOverlay('end', score);
-      if (document.pointerLockElement) document.exitPointerLock();
+
+  if (hit) {
+    const obj = hit.object;
+    if (obj.userData.bot) {
+      const isHead = obj === obj.userData.bot.headMesh;
+      const dmg = isHead ? wData.damage * 3 : wData.damage;
+      const killed = bots.damageBot(obj, dmg);
+      hud.hitMarker(killed, 90);
+      if (killed) {
+        store.addMoney(300);
+        store.addॉलKillFeed(`YOU [${wData.name}] ${obj.userData.bot.name}`);
+      }
     }
   }
-  weapon.pullTrigger();
-  player.recoil(0.009 + random() * 0.004, (random() * 2 - 1) * 0.004);
-  hud.setAmmo(weapon.state.mag, weapon.state.reserve);
-  return true;
+
+  const muzzlePos = camera.position.clone().add(new THREE.Vector3(0.28, -0.24, -0.5).applyQuaternion(camera.quaternion));
+  const hitPos = hit ? hit.point : camera.position.clone().addScaledVector(direction, 60);
+  createTracer(muzzlePos, hitPos);
+
+  weaponSystem.pullTrigger();
+  player.recoil(wData.recoilPitch, (Math.random() * 2 - 1) * 0.005);
+  bots.emitSound(body.position, 30);
+  const curState = weaponSystem.getState();
+  hud.setAmmo(curState.mag, curState.reserve);
 }
 
 function step(dt) {
   elapsed += dt;
-  player.step(dt, input.state.keys);
-  weapon.step(dt);
-  targets.step(dt, elapsed);
+
+  for (let i = activeTracers.length - 1; i >= 0; i--) {
+    const tr = activeTracers[i];
+    tr.ttl -= dt;
+    tr.line.material.opacity = Math.max(0, tr.ttl / 0.08 * 0.95);
+    if (tr.ttl <= 0) {
+      scene.remove(tr.line);
+      tr.line.geometry.dispose();
+      tr.line.material.dispose();
+      activeTracers.splice(i, 1);
+    }
+  }
+
+  if (store.roundState !== 'freeze') {
+    player.step(dt, input.state.keys);
+  }
+  weaponSystem.step(dt);
+  grenades.step(dt, body.position, bots.bots, (dmg) => {
+    body.hp -= store.armor ? dmg * 0.5 : dmg;
+    if (body.hp <= 0 && body.alive) {
+      body.alive = false;
+      store.addॉलKillFeed('YOU were eliminated');
+    }
+  });
+  bots.step(dt, elapsed, body.position, body.alive, store);
+  roundState.step(dt, body.position, body.alive);
+
+  // Handle player damage from store
+  if (store.playerDamaged) {
+    body.hp -= store.armor ? store.playerDamaged * 0.5 : store.playerDamaged;
+    store.playerDamaged = 0;
+    if (body.hp <= 0 && body.alive) {
+      body.alive = false;
+      store.addॉलKillFeed('YOU were eliminated');
+    }
+  }
+
+  // Handle Plant / Defuse (E key)
+  if (input.state.keys.has('KeyE') && store.roundState === 'playing' && !store.bomb.planted) {
+    // Check distance to bomb sites A or B
+    const nearA = body.position.distanceTo(new THREE.Vector3(-13, 0, -14)) < 3.5;
+    const nearB = body.position.distanceTo(new THREE.Vector3(13, 0, -14)) < 3.5;
+    if (nearA || nearB) {
+      plantHoldTime += dt;
+      store.bomb.plantProgress = plantHoldTime / 3.0;
+      if (plantHoldTime >= 3.0) {
+        store.bomb.planted = true;
+        store.bomb.site = nearA ? 'A' : 'B';
+        store.bomb.timer = 40.0;
+        store.addॉलKillFeed(`Bomb planted at Site ${store.bomb.site}!`);
+        audio.playBeep();
+      }
+    } else {
+      plantHoldTime = 0;
+      store.bomb.plantProgress = 0;
+    }
+  } else {
+    plantHoldTime = 0;
+    store.bomb.plantProgress = 0;
+  }
+
+  // Handle Buy Menu toggle (B key)
+  if (input.state.keys.has('KeyB') && !buyMenuOpen) {
+    buyMenuOpen = true;
+    hud.showBuyMenu(true);
+    if (document.pointerLockElement) document.exitPointerLock();
+  }
+
+  // Handle weapon switching (1, 2, 3, 4 keys)
+  if (input.state.keys.has('Digit1')) weaponSystem.switchWeapon(0);
+  if (input.state.keys.has('Digit2')) weaponSystem.switchWeapon(1);
+  if (input.state.keys.has('Digit3')) weaponSystem.switchWeapon(2);
+  if (input.state.keys.has('Digit4')) weaponSystem.switchWeapon(3);
+
+  // Handle grenade throw (G key)
+  if (input.state.keys.has('KeyG') && store.grenades > 0) {
+    input.state.keys.delete('KeyG');
+    camera.getWorldDirection(direction);
+    grenades.throwGrenade(camera.position, direction);
+  }
+
+  hud.update(body.hp, store.armor, store.money, store.roundTime, store.scoreAttack, store.scoreDefense, store.killFeed);
+  hud.showBanner(store.roundBanner.text, store.roundBanner.sub, store.roundBanner.active);
+  if (store.roundBanner.active) {
+    store.roundBanner.timer -= dt;
+    if (store.roundBanner.timer <= 0) store.roundBanner.active = false;
+  }
 }
 
 function frame(now) {
   requestAnimationFrame(frame);
   const dt = Math.min((now - lastTime) / 1000, 0.1);
   lastTime = now;
-  if (!frozen) {
+
+  if (input.state.locked) {
     const look = input.takeLook();
     player.look(look.x, look.y);
-    if (input.state.firing && weapon.ready()) shoot(shot ? 0 : weapon.spread(player.groundSpeed()));
-    if (input.state.keys.has('KeyR')) weapon.reload();
-    accumulator += dt;
-    let steps = 0;
-    while (accumulator >= FIXED_STEP && steps < 5) {
-      step(FIXED_STEP);
-      accumulator -= FIXED_STEP;
-      steps += 1;
-    }
-    if (accumulator > FIXED_STEP * 5) accumulator = 0;
-    syncCamera();
+    if (input.state.firing && weaponSystem.ready()) shoot();
+    if (input.state.keys.has('KeyR')) weaponSystem.reload();
   }
+
+  accumulator += dt;
+  let steps = 0;
+  while (accumulator >= FIXED_STEP && steps < 5) {
+    step(FIXED_STEP);
+    accumulator -= FIXED_STEP;
+    steps += 1;
+  }
+  if (accumulator > FIXED_STEP * 5) accumulator = 0;
+
+  syncCamera();
+  minimap.render(body.position, body.yaw, bots.bots, world.colliders);
   renderer.render(scene, camera);
-}
-
-function settle(steps) {
-  for (let index = 0; index < steps; index += 1) step(FIXED_STEP);
-}
-
-function runShot(name) {
-  hud.hideOverlay();
-  body.pitch = 0;
-  body.yaw = 0;
-  if (name === 'play' || name === 'end') {
-    body.position.set(0, 0, -5);
-    settle(20);
-    const count = name === 'play' ? 1 : targets.items.length;
-    for (let index = 0; index < count; index += 1) {
-      const point = targets.aimPoint(index);
-      for (let round = 0; round < 3; round += 1) {
-        aimAt(point);
-        shoot(0);
-        if (round < 2) settle(8);
-      }
-    }
-    if (name === 'play') {
-      settle(12);
-      aimAt(targets.aimPoint(1));
-      shoot(0);
-      settle(1);
-    } else {
-      settle(40);
-    }
-  } else {
-    body.position.set(0.6, 0, 8.6);
-    settle(20);
-    aimAt(new THREE.Vector3(0, 1.5, -6));
-    hud.showOverlay('start', 0);
-  }
-  hud.setScore(score);
-  hud.setAmmo(weapon.state.mag, weapon.state.reserve);
-  paintTwiceThenReady();
-}
-
-function paintTwiceThenReady() {
-  let painted = 0;
-  function paint() {
-    requestAnimationFrame(paint);
-    syncCamera();
-    renderer.render(scene, camera);
-    painted += 1;
-    if (painted === 2) {
-      window.__shotReady = true;
-      frozen = true;
-    }
-  }
-  requestAnimationFrame(paint);
 }
 
 window.addEventListener('resize', () => {
@@ -220,6 +245,16 @@ window.addEventListener('resize', () => {
   renderer.setSize(window.innerWidth, window.innerHeight);
 });
 
+// Scroll wheel weapon switching
+window.addEventListener('wheel', (e) => {
+  if (!input.state.locked) return;
+  let idx = store.activeWeaponIndex + (e.deltaY > 0 ? 1 : -1);
+  if (idx < 0) idx = 3;
+  if (idx > 3) idx = 0;
+  weaponSystem.switchWeapon(idx);
+});
+
 syncCamera();
-if (shot) runShot(shot);
-else requestAnimationFrame(frame);
+const curState = weaponSystem.getState();
+hud.setAmmo(curState.mag, curState.reserve);
+requestAnimationFrame(frame);
